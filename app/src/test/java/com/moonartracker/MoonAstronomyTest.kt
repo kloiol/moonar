@@ -4,6 +4,7 @@ import com.moonartracker.ar.ArProjection
 import com.moonartracker.ar.CameraFov
 import com.moonartracker.astronomy.GeoPosition
 import com.moonartracker.astronomy.MoonAstronomy
+import com.moonartracker.astronomy.SunAstronomy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +24,17 @@ class MoonAstronomyTest {
     }
 
     @Test
+    fun meeusExample25a_sunGeocentricEclipticMatchesReference() {
+        // Jean Meeus, Astronomical Algorithms (2nd ed.), Example 25.a:
+        // 1992 October 13, 0h TD -> JDE = 2448908.5
+        // Expected: apparent lambda ~ 199.90895 deg, radius ~ 0.99766 AU
+        val (sunLonDeg, distAu) = SunAstronomy.calculateGeocentricEcliptic(2448908.5)
+
+        assertEquals(199.90895, sunLonDeg, 0.01)
+        assertEquals(0.99766, distAu, 0.001)
+    }
+
+    @Test
     fun topocentricPosition_returnsValidRangesAndParallax() {
         val geo = GeoPosition(latitudeDeg = 60.5544, longitudeDeg = -151.2583, altitudeMeters = 20.0)
         // 2026-11-27 12:00:00 UTC
@@ -34,6 +46,20 @@ class MoonAstronomyTest {
         assertTrue("Distance in [356000, 407000] km", pos.distanceKm in 356000.0..407000.0)
         assertTrue("Illumination in [0, 1]", pos.illuminatedFraction in 0.0..1.0)
         assertTrue("Angular diameter ~0.49-0.56 deg", pos.angularDiameterDeg in 0.45..0.60)
+    }
+
+    @Test
+    fun moonVisibilityForecast_accountsForObserverHeightHorizonDip() {
+        val seaLevel = GeoPosition(latitudeDeg = 40.0, longitudeDeg = -74.0, altitudeMeters = 0.0)
+        val mountain = GeoPosition(latitudeDeg = 40.0, longitudeDeg = -74.0, altitudeMeters = 3000.0)
+        val epochMillis = 1795694400000L
+
+        val fSea = MoonAstronomy.calculateVisibilityForecast(seaLevel, epochMillis)
+        val fMtn = MoonAstronomy.calculateVisibilityForecast(mountain, epochMillis)
+
+        assertEquals(0.0, fSea.horizonDipDeg, 1e-6)
+        assertTrue("Higher elevation should dip horizon further", fMtn.horizonDipDeg > 1.5)
+        assertTrue("Should find rise or set event at mid-latitude", fSea.nextRiseMillis != null || fSea.nextSetMillis != null)
     }
 
     @Test

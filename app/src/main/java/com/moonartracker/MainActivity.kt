@@ -56,12 +56,19 @@ import com.moonartracker.ar.CameraFov
 import com.moonartracker.astronomy.GeoPosition
 import com.moonartracker.astronomy.MoonAstronomy
 import com.moonartracker.astronomy.MoonPosition
+import com.moonartracker.astronomy.MoonVisibilityForecast
 import com.moonartracker.astronomy.SkyPoint
+import com.moonartracker.astronomy.SunAstronomy
+import com.moonartracker.astronomy.SunPosition
+import com.moonartracker.astronomy.TrackedBody
 import com.moonartracker.location.LocationRepository
 import com.moonartracker.sensors.OrientationSensorManager
 import com.moonartracker.ui.ArOverlayCanvas
 import com.moonartracker.ui.CameraPreview
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -165,24 +172,31 @@ private fun MoonArScreen(
     val locationState by locationRepository.state.collectAsState()
 
     var cameraFov by remember { mutableStateOf(CameraFov()) }
+    var trackedBody by remember { mutableStateOf(TrackedBody.MOON) }
     var showHorizon by remember { mutableStateOf(true) }
     var showTrajectory by remember { mutableStateOf(true) }
     var showManualDialog by remember { mutableStateOf(false) }
+    var visibilityForecast by remember { mutableStateOf<MoonVisibilityForecast?>(null) }
 
     var moonPosition by remember { mutableStateOf<MoonPosition?>(null) }
+    var sunPosition by remember { mutableStateOf<SunPosition?>(null) }
     var trajectory by remember { mutableStateOf<List<SkyPoint>>(emptyList()) }
 
-    // Real-time 1 Hz lunar ephemeris calculation loop
-    LaunchedEffect(locationState.position) {
+    // Real-time 1 Hz ephemeris loop for Moon & Sun + active body trajectory
+    LaunchedEffect(locationState.position, trackedBody) {
         val geo = locationState.position ?: return@LaunchedEffect
         var lastTrajectoryCalc = 0L
         while (true) {
             val now = System.currentTimeMillis()
             orientationManager.updateGeomagneticDeclination(geo, now)
             moonPosition = MoonAstronomy.calculateMoonPosition(geo, now, applyRefraction = true)
+            sunPosition = SunAstronomy.calculateSunPosition(geo, now, applyRefraction = true)
 
             if (now - lastTrajectoryCalc > 60_000L || trajectory.isEmpty()) {
-                trajectory = MoonAstronomy.calculateTrajectory(geo, now)
+                trajectory = when (trackedBody) {
+                    TrackedBody.MOON -> MoonAstronomy.calculateTrajectory(geo, now)
+                    TrackedBody.SUN -> SunAstronomy.calculateTrajectory(geo, now)
+                }
                 lastTrajectoryCalc = now
             }
             delay(1000L)
@@ -215,8 +229,10 @@ private fun MoonArScreen(
 
                 ArOverlayCanvas(
                     modifier = Modifier.fillMaxSize(),
+                    trackedBody = trackedBody,
                     orientation = orientationState,
                     moonPosition = moonPosition,
+                    sunPosition = sunPosition,
                     trajectory = trajectory,
                     cameraFov = cameraFov,
                     showHorizon = showHorizon,
@@ -232,8 +248,10 @@ private fun MoonArScreen(
                         .align(Alignment.TopCenter),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    MoonTelemetryCard(
+                    CelestialTelemetryCard(
+                        trackedBody = trackedBody,
                         moon = moonPosition,
+                        sun = sunPosition,
                         geo = locationState.position,
                         locationStatus = locationState.statusText,
                         declinationDeg = orientationState.magneticDeclinationDeg,
@@ -268,53 +286,128 @@ private fun MoonArScreen(
                     }
                 }
 
-                // Bottom AR Controls
-                Row(
+                // Bottom AR Controls (2 clean rows)
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .safeDrawingPadding()
-                        .padding(horizontal = 12.dp, vertical = 12.dp)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
                         .align(Alignment.BottomCenter),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    FilterChip(
-                        selected = showHorizon,
-                        onClick = { showHorizon = !showHorizon },
-                        label = { Text("Horizon", fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = Color(0xAA0F172A),
-                            selectedContainerColor = Color(0xCC0284C7),
-                            labelColor = Color.White,
-                            selectedLabelColor = Color.White
-                        )
-                    )
-                    FilterChip(
-                        selected = showTrajectory,
-                        onClick = { showTrajectory = !showTrajectory },
-                        label = { Text("24h Path", fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = Color(0xAA0F172A),
-                            selectedContainerColor = Color(0xCCD97706),
-                            labelColor = Color.White,
-                            selectedLabelColor = Color.White
-                        )
-                    )
-                    OutlinedButton(
-                        onClick = { showManualDialog = true },
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = Color(0xAA0F172A),
-                            contentColor = Color.White
-                        )
+                    // Primary action buttons: Moon/Sun Mode Switch + Moon Visibility Forecast
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = if (locationState.isManualOverride) "GPS: Manual" else "Set GPS",
-                            fontSize = 12.sp
+                        Button(
+                            onClick = {
+                                trackedBody = if (trackedBody == TrackedBody.MOON) {
+                                    TrackedBody.SUN
+                                } else {
+                                    TrackedBody.MOON
+                                }
+                                trajectory = emptyList()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (trackedBody == TrackedBody.SUN) {
+                                    Color(0xDD475569)
+                                } else {
+                                    Color(0xDDEA580C)
+                                },
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(
+                                text = if (trackedBody == TrackedBody.MOON) "Show Sun" else "Show Moon",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                val geo = locationState.position
+                                if (geo != null) {
+                                    visibilityForecast = MoonAstronomy.calculateVisibilityForecast(
+                                        geo = geo,
+                                        startEpochMillis = System.currentTimeMillis()
+                                    )
+                                } else {
+                                    showManualDialog = true
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xDD1D4ED8),
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(
+                                text = "Moon Visibility",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    // Secondary overlay toggles & GPS override
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = showHorizon,
+                            onClick = { showHorizon = !showHorizon },
+                            label = { Text("Horizon", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = Color(0xAA0F172A),
+                                selectedContainerColor = Color(0xCC0284C7),
+                                labelColor = Color.White,
+                                selectedLabelColor = Color.White
+                            )
                         )
+                        FilterChip(
+                            selected = showTrajectory,
+                            onClick = { showTrajectory = !showTrajectory },
+                            label = { Text("24h Path", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = Color(0xAA0F172A),
+                                selectedContainerColor = if (trackedBody == TrackedBody.SUN) {
+                                    Color(0xCCEA580C)
+                                } else {
+                                    Color(0xCCD97706)
+                                },
+                                labelColor = Color.White,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                        OutlinedButton(
+                            onClick = { showManualDialog = true },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = Color(0xAA0F172A),
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text(
+                                text = if (locationState.isManualOverride) "GPS: Manual" else "Set GPS",
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+
+    visibilityForecast?.let { forecast ->
+        MoonVisibilityDialog(
+            forecast = forecast,
+            geo = locationState.position,
+            onDismiss = { visibilityForecast = null }
+        )
     }
 
     if (showManualDialog) {
@@ -335,13 +428,19 @@ private fun MoonArScreen(
 }
 
 @Composable
-private fun MoonTelemetryCard(
+private fun CelestialTelemetryCard(
+    trackedBody: TrackedBody,
     moon: MoonPosition?,
+    sun: SunPosition?,
     geo: GeoPosition?,
     locationStatus: String,
     declinationDeg: Double,
     cameraPointing: Pair<Double, Double>?
 ) {
+    val headerTitle = if (trackedBody == TrackedBody.SUN) "SUN AR TRACKER" else "MOON AR TRACKER"
+    val headerColor = if (trackedBody == TrackedBody.SUN) Color(0xFFFFB74D) else Color(0xFFFFD54F)
+    val activeAlt = if (trackedBody == TrackedBody.SUN) sun?.altitudeDeg else moon?.altitudeDeg
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -355,19 +454,21 @@ private fun MoonTelemetryCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "MOON AR TRACKER",
-                color = Color(0xFFFFD54F),
+                text = headerTitle,
+                color = headerColor,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp,
                 fontFamily = FontFamily.Monospace
             )
             Text(
-                text = moon?.let {
-                    if (it.altitudeDeg >= 0.0) "ABOVE HORIZON" else "BELOW HORIZON"
-                } ?: locationStatus,
+                text = when {
+                    activeAlt == null -> locationStatus
+                    activeAlt >= 0.0 -> "ABOVE HORIZON"
+                    else -> "BELOW HORIZON"
+                },
                 color = when {
-                    moon == null -> Color(0xFF94A3B8)
-                    moon.altitudeDeg >= 0.0 -> Color(0xFF4ADE80)
+                    activeAlt == null -> Color(0xFF94A3B8)
+                    activeAlt >= 0.0 -> Color(0xFF4ADE80)
                     else -> Color(0xFFF87171)
                 },
                 fontWeight = FontWeight.SemiBold,
@@ -376,7 +477,7 @@ private fun MoonTelemetryCard(
             )
         }
 
-        if (moon != null) {
+        if (trackedBody == TrackedBody.MOON && moon != null) {
             Text(
                 text = String.format(
                     "Moon  Az: %6.2f deg   Alt: %+6.2f deg   Dist: %.0f km",
@@ -395,6 +496,29 @@ private fun MoonTelemetryCard(
                     moon.illuminatedFraction * 100.0,
                     moon.rightAscensionDeg,
                     moon.declinationDeg
+                ),
+                color = Color(0xFFCBD5E1),
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        } else if (trackedBody == TrackedBody.SUN && sun != null) {
+            Text(
+                text = String.format(
+                    "Sun   Az: %6.2f deg   Alt: %+6.2f deg   Dist: %.4f AU",
+                    sun.azimuthDeg,
+                    sun.altitudeDeg,
+                    sun.distanceAu
+                ),
+                color = Color.White,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = String.format(
+                    "Sky: %s   RA: %.1f deg  Dec: %+.1f deg",
+                    sun.twilightPhase,
+                    sun.rightAscensionDeg,
+                    sun.declinationDeg
                 ),
                 color = Color(0xFFCBD5E1),
                 fontSize = 11.sp,
@@ -438,6 +562,101 @@ private fun MoonTelemetryCard(
 }
 
 @Composable
+private fun MoonVisibilityDialog(
+    forecast: MoonVisibilityForecast,
+    geo: GeoPosition?,
+    onDismiss: () -> Unit
+) {
+    val timeFmt = remember { SimpleDateFormat("EEE, MMM d  HH:mm", Locale.getDefault()) }
+    val now = System.currentTimeMillis()
+
+    fun formatRelative(targetMillis: Long): String {
+        val diffMin = ((targetMillis - now) / 60_000L).coerceAtLeast(0L)
+        val days = diffMin / 1440L
+        val hours = (diffMin % 1440L) / 60L
+        val mins = diffMin % 60L
+        return when {
+            days > 0 -> "in ${days}d ${hours}h ${mins}m"
+            hours > 0 -> "in ${hours}h ${mins}m"
+            else -> "in ${mins}m"
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (forecast.isCurrentlyVisible) "Moon Visible Now" else "Next Moon Visibility",
+                color = if (forecast.isCurrentlyVisible) Color(0xFF4ADE80) else Color(0xFFFFD54F),
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = forecast.summaryNote,
+                    color = Color(0xFFE2E8F0),
+                    fontSize = 13.sp
+                )
+                geo?.let {
+                    Text(
+                        text = String.format(
+                            "Observer: %.4f, %.4f | Height: %.1f m\nHorizon Dip: -%.3f deg (Threshold: %.2f deg)",
+                            it.latitudeDeg,
+                            it.longitudeDeg,
+                            forecast.observerAltitudeMeters,
+                            forecast.horizonDipDeg,
+                            forecast.visibilityThresholdDeg
+                        ),
+                        color = Color(0xFF94A3B8),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Text(
+                    text = String.format("Current Altitude: %+.2f deg", forecast.currentAltitudeDeg),
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                forecast.nextRiseMillis?.let { riseMs ->
+                    val azStr = forecast.nextRiseAzimuthDeg?.let { String.format(" (Az %.1f deg)", it) } ?: ""
+                    Text(
+                        text = "Next Moonrise:\n${timeFmt.format(Date(riseMs))} (${formatRelative(riseMs)})$azStr",
+                        color = Color(0xFFFFE082),
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                forecast.nextPeakMillis?.let { peakMs ->
+                    val peakAltStr = forecast.nextPeakAltitudeDeg?.let { String.format("Max Alt %+.1f deg", it) } ?: ""
+                    Text(
+                        text = "Peak Altitude:\n${timeFmt.format(Date(peakMs))} ($peakAltStr)",
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                forecast.nextSetMillis?.let { setMs ->
+                    val azStr = forecast.nextSetAzimuthDeg?.let { String.format(" (Az %.1f deg)", it) } ?: ""
+                    Text(
+                        text = "Next Moonset:\n${timeFmt.format(Date(setMs))} (${formatRelative(setMs)})$azStr",
+                        color = Color(0xFF93C5FD),
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
 private fun PermissionPrompt(onRequestPermissions: () -> Unit) {
     Column(
         modifier = Modifier
@@ -454,7 +673,7 @@ private fun PermissionPrompt(onRequestPermissions: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "Camera and Location permissions are needed to compute the Moon's topocentric position and overlay it in real time.",
+            text = "Camera and Location permissions are needed to compute the Moon and Sun positions and overlay them in real time.",
             color = Color(0xFFCBD5E1),
             fontSize = 14.sp
         )
@@ -479,7 +698,7 @@ private fun ManualLocationDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Observer Geoposition") },
+        title = { Text("Observer Geoposition & Height") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -497,7 +716,7 @@ private fun ManualLocationDialog(
                 OutlinedTextField(
                     value = altText,
                     onValueChange = { altText = it },
-                    label = { Text("Altitude (meters)") },
+                    label = { Text("Height / Altitude (meters)") },
                     singleLine = true
                 )
             }

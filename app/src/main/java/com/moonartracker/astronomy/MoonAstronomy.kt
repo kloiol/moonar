@@ -8,7 +8,6 @@ import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.math.sqrt
 import kotlin.math.tan
 
 data class GeoPosition(
@@ -39,13 +38,28 @@ data class SkyPoint(
     val altitudeDeg: Double
 )
 
+data class MoonVisibilityForecast(
+    val isCurrentlyVisible: Boolean,
+    val currentAltitudeDeg: Double,
+    val observerAltitudeMeters: Double,
+    val horizonDipDeg: Double,
+    val visibilityThresholdDeg: Double,
+    val nextRiseMillis: Long?,
+    val nextRiseAzimuthDeg: Double?,
+    val nextSetMillis: Long?,
+    val nextSetAzimuthDeg: Double?,
+    val nextPeakMillis: Long?,
+    val nextPeakAltitudeDeg: Double?,
+    val summaryNote: String
+)
+
 /**
  * High-accuracy Lunar Ephemeris and Topocentric Coordinate Engine.
  *
  * Implements Jean Meeus, "Astronomical Algorithms" (2nd ed., Chapter 47 / truncated ELP-2000/82),
  * nutation & true obliquity (Chapter 22), Greenwich Apparent Sidereal Time (Chapter 12),
  * WGS-84 rigorous topocentric parallax (Chapter 40), lunar phase & bright limb (Chapter 48),
- * and Bennett's atmospheric refraction formula (Chapter 16).
+ * horizon dip from observer elevation, and Bennett's atmospheric refraction formula (Chapter 16).
  */
 object MoonAstronomy {
 
@@ -141,6 +155,16 @@ object MoonAstronomy {
     }
 
     /**
+     * Geometric horizon dip (degrees) caused by observer height above the reference ellipsoid.
+     */
+    fun calculateHorizonDipDeg(altitudeMeters: Double): Double {
+        if (altitudeMeters <= 0.0) return 0.0
+        val hKm = altitudeMeters / 1000.0
+        val ratio = (EARTH_EQUATORIAL_RADIUS_KM / (EARTH_EQUATORIAL_RADIUS_KM + hKm)).coerceIn(-1.0, 1.0)
+        return acos(ratio) * RAD2DEG
+    }
+
+    /**
      * Computes geocentric ecliptic longitude (deg), latitude (deg), and distance (km)
      * for a given Julian Ephemeris Date (JDE / TT).
      */
@@ -222,27 +246,6 @@ object MoonAstronomy {
         val distanceKm = 385000.56 + sumR / 1000.0
 
         return Triple(lambdaDeg, betaDeg, distanceKm)
-    }
-
-    /**
-     * Computes Sun's apparent geocentric ecliptic longitude (deg) and distance (AU)
-     * for lunar phase and bright-limb orientation (Meeus Ch. 25).
-     */
-    private fun calculateSunPosition(jde: Double): Pair<Double, Double> {
-        val t = (jde - 2451545.0) / 36525.0
-        val l0 = normalize360(280.46646 + 36000.76983 * t + 0.0003032 * t * t)
-        val m = normalize360(357.52911 + 35999.05029 * t - 0.0001537 * t * t)
-        val mRad = m * DEG2RAD
-        val c = (1.914602 - 0.004817 * t - 0.000014 * t * t) * sin(mRad) +
-            (0.019993 - 0.000101 * t) * sin(2.0 * mRad) +
-            0.000289 * sin(3.0 * mRad)
-        val trueLon = normalize360(l0 + c)
-        val omega = normalize360(125.04 - 1934.136 * t) * DEG2RAD
-        val apparentLon = normalize360(trueLon - 0.00569 - 0.00478 * sin(omega))
-        val ecc = 0.016708634 - 0.000042037 * t - 0.0000001267 * t * t
-        val trueAnomaly = (m + c) * DEG2RAD
-        val radiusAu = (1.000001018 * (1.0 - ecc * ecc)) / (1.0 + ecc * cos(trueAnomaly))
-        return Pair(apparentLon, radiusAu * 149_597_870.7) // distance in km
     }
 
     /**
@@ -351,7 +354,8 @@ object MoonAstronomy {
         val parallacticAngleDeg = atan2(sinH, tan(latRad) * cosDec - sinDec * cosH) * RAD2DEG
 
         // Solar position for lunar phase, illumination, and bright limb angle (Meeus Ch. 48)
-        val (sunLonDeg, sunDistKm) = calculateSunPosition(jde)
+        val (sunLonDeg, sunDistAu) = SunAstronomy.calculateGeocentricEcliptic(jde)
+        val sunDistKm = sunDistAu * 149_597_870.7
         val sunLonRad = sunLonDeg * DEG2RAD
         val sunRaRad = atan2(sin(sunLonRad) * cosEps, cos(sunLonRad))
         val sunDecRad = asin((sin(sunLonRad) * sinEps).coerceIn(-1.0, 1.0))
@@ -392,6 +396,129 @@ object MoonAstronomy {
             parallacticAngleDeg = parallacticAngleDeg,
             angularDiameterDeg = angularDiameterDeg
         )
+    }
+
+    /**
+     * Calculates when the Moon will next be visible (upper limb above the observer's
+     * elevation-adjusted horizon) from [geo] starting at [startEpochMillis].
+     *
+     * Accounts for WGS-84 topocentric parallax, atmospheric refraction, Moon semi-diameter,
+     * and geometric horizon dip from [geo.altitudeMeters]. Searches up to [maxSearchDays] days
+     * to handle high-latitude polar regions where the Moon can stay below/above horizon for days.
+     */
+    fun calculateVisibilityForecast(
+        geo: GeoPosition,
+        startEpochMillis: Long,
+        maxSearchDays: Int = 15
+    ): MoonVisibilityForecast {
+        val dipDeg = calculateHorizonDipDeg(geo.altitudeMeters)
+        val nowPos = calculateMoonPosition(geo, startEpochMillis, applyRefraction = true)
+        val thresholdDeg = -(nowPos.angularDiameterDeg * 0.5) - dipDeg
+        val isCurrentlyVisible = nowPos.altitudeDeg >= thresholdDeg
+
+        val stepMillis = 10 * 60_000L // 10-minute coarse scan
+        val endMillis = startEpochMillis + maxSearchDays * 86_400_000L
+
+        var nextRiseMillis: Long? = null
+        var nextRiseAz: Double? = null
+        var nextSetMillis: Long? = null
+        var nextSetAz: Double? = null
+
+        var prevT = startEpochMillis
+        var prevMargin = nowPos.altitudeDeg - thresholdDeg
+
+        var t = startEpochMillis + stepMillis
+        while (t <= endMillis && (nextRiseMillis == null || nextSetMillis == null)) {
+            val pos = calculateMoonPosition(geo, t, applyRefraction = true)
+            val currThreshold = -(pos.angularDiameterDeg * 0.5) - dipDeg
+            val currMargin = pos.altitudeDeg - currThreshold
+
+            if (prevMargin < 0.0 && currMargin >= 0.0 && nextRiseMillis == null) {
+                val crossing = bisectCrossing(geo, prevT, t, dipDeg, rising = true)
+                nextRiseMillis = crossing
+                nextRiseAz = calculateMoonPosition(geo, crossing, applyRefraction = true).azimuthDeg
+            } else if (prevMargin >= 0.0 && currMargin < 0.0 && nextSetMillis == null) {
+                // If not currently visible, wait until after the next rise to record the paired set
+                if (isCurrentlyVisible || nextRiseMillis != null) {
+                    val crossing = bisectCrossing(geo, prevT, t, dipDeg, rising = false)
+                    nextSetMillis = crossing
+                    nextSetAz = calculateMoonPosition(geo, crossing, applyRefraction = true).azimuthDeg
+                }
+            }
+
+            prevT = t
+            prevMargin = currMargin
+            t += stepMillis
+        }
+
+        // Find peak altitude during the current or next visible window (bounded to 36h window)
+        val peakWindowStart = if (isCurrentlyVisible) startEpochMillis else (nextRiseMillis ?: startEpochMillis)
+        val peakWindowEnd = when {
+            nextSetMillis != null && nextSetMillis > peakWindowStart -> nextSetMillis
+            else -> peakWindowStart + 24 * 3_600_000L
+        }.coerceAtMost(peakWindowStart + 36 * 3_600_000L)
+
+        var peakTime: Long? = null
+        var peakAlt = -999.0
+        if (isCurrentlyVisible || nextRiseMillis != null) {
+            var scan = peakWindowStart
+            while (scan <= peakWindowEnd) {
+                val alt = calculateMoonPosition(geo, scan, applyRefraction = true).altitudeDeg
+                if (alt > peakAlt) {
+                    peakAlt = alt
+                    peakTime = scan
+                }
+                scan += 10 * 60_000L
+            }
+        }
+
+        val summaryNote = when {
+            isCurrentlyVisible && nextSetMillis != null ->
+                "The Moon is currently visible from your position and elevation."
+            isCurrentlyVisible && nextSetMillis == null ->
+                "The Moon stays above your elevation-adjusted horizon for the next $maxSearchDays days."
+            !isCurrentlyVisible && nextRiseMillis != null ->
+                "The Moon is currently below your horizon. See the next rise window below."
+            else ->
+                "The Moon remains below your horizon for the next $maxSearchDays days."
+        }
+
+        return MoonVisibilityForecast(
+            isCurrentlyVisible = isCurrentlyVisible,
+            currentAltitudeDeg = nowPos.altitudeDeg,
+            observerAltitudeMeters = geo.altitudeMeters,
+            horizonDipDeg = dipDeg,
+            visibilityThresholdDeg = thresholdDeg,
+            nextRiseMillis = nextRiseMillis,
+            nextRiseAzimuthDeg = nextRiseAz,
+            nextSetMillis = nextSetMillis,
+            nextSetAzimuthDeg = nextSetAz,
+            nextPeakMillis = peakTime,
+            nextPeakAltitudeDeg = if (peakTime != null) peakAlt else null,
+            summaryNote = summaryNote
+        )
+    }
+
+    private fun bisectCrossing(
+        geo: GeoPosition,
+        tLow: Long,
+        tHigh: Long,
+        dipDeg: Double,
+        rising: Boolean
+    ): Long {
+        var lo = tLow
+        var hi = tHigh
+        for (i in 0 until 12) { // 10 min / 2^12 ~ 0.15 sec precision
+            val mid = lo + (hi - lo) / 2L
+            val pos = calculateMoonPosition(geo, mid, applyRefraction = true)
+            val margin = pos.altitudeDeg - (-(pos.angularDiameterDeg * 0.5) - dipDeg)
+            if (rising) {
+                if (margin < 0.0) lo = mid else hi = mid
+            } else {
+                if (margin >= 0.0) lo = mid else hi = mid
+            }
+        }
+        return lo + (hi - lo) / 2L
     }
 
     /**
