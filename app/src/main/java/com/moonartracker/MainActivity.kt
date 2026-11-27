@@ -53,10 +53,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.moonartracker.ar.ArProjection
 import com.moonartracker.ar.CameraFov
+import com.moonartracker.astronomy.CompassSector
 import com.moonartracker.astronomy.GeoPosition
 import com.moonartracker.astronomy.MoonAstronomy
 import com.moonartracker.astronomy.MoonPosition
-import com.moonartracker.astronomy.MoonVisibilityForecast
+import com.moonartracker.astronomy.MoonSectorVisibilityForecast
 import com.moonartracker.astronomy.SkyPoint
 import com.moonartracker.astronomy.SunAstronomy
 import com.moonartracker.astronomy.SunPosition
@@ -176,11 +177,21 @@ private fun MoonArScreen(
     var showHorizon by remember { mutableStateOf(true) }
     var showTrajectory by remember { mutableStateOf(true) }
     var showManualDialog by remember { mutableStateOf(false) }
-    var visibilityForecast by remember { mutableStateOf<MoonVisibilityForecast?>(null) }
+    var sectorForecast by remember { mutableStateOf<MoonSectorVisibilityForecast?>(null) }
 
     var moonPosition by remember { mutableStateOf<MoonPosition?>(null) }
     var sunPosition by remember { mutableStateOf<SunPosition?>(null) }
     var trajectory by remember { mutableStateOf<List<SkyPoint>>(emptyList()) }
+
+    val cameraPointing = if (orientationState.isReady) {
+        ArProjection.getCameraPointingAzAlt(
+            orientationState.rotationMatrix3x3,
+            orientationState.magneticDeclinationDeg
+        )
+    } else {
+        null
+    }
+    val aimedSector = cameraPointing?.let { (az, _) -> CompassSector.fromAzimuth(az) } ?: CompassSector.SE
 
     // Real-time 1 Hz ephemeris loop for Moon & Sun + active body trajectory
     LaunchedEffect(locationState.position, trackedBody) {
@@ -255,14 +266,8 @@ private fun MoonArScreen(
                         geo = locationState.position,
                         locationStatus = locationState.statusText,
                         declinationDeg = orientationState.magneticDeclinationDeg,
-                        cameraPointing = if (orientationState.isReady) {
-                            ArProjection.getCameraPointingAzAlt(
-                                orientationState.rotationMatrix3x3,
-                                orientationState.magneticDeclinationDeg
-                            )
-                        } else {
-                            null
-                        }
+                        cameraPointing = cameraPointing,
+                        aimedSector = aimedSector
                     )
 
                     if (orientationState.sensorAccuracy == SensorManager.SENSOR_STATUS_UNRELIABLE ||
@@ -296,7 +301,6 @@ private fun MoonArScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // Primary action buttons: Moon/Sun Mode Switch + Moon Visibility Forecast
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -331,8 +335,9 @@ private fun MoonArScreen(
                             onClick = {
                                 val geo = locationState.position
                                 if (geo != null) {
-                                    visibilityForecast = MoonAstronomy.calculateVisibilityForecast(
+                                    sectorForecast = MoonAstronomy.calculateSectorVisibilityForecast(
                                         geo = geo,
+                                        sector = aimedSector,
                                         startEpochMillis = System.currentTimeMillis()
                                     )
                                 } else {
@@ -345,14 +350,13 @@ private fun MoonArScreen(
                             )
                         ) {
                             Text(
-                                text = "Moon Visibility",
+                                text = "Moon in ${aimedSector.shortLabel}",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
 
-                    // Secondary overlay toggles & GPS override
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -402,11 +406,21 @@ private fun MoonArScreen(
         }
     }
 
-    visibilityForecast?.let { forecast ->
-        MoonVisibilityDialog(
+    sectorForecast?.let { forecast ->
+        MoonSectorVisibilityDialog(
             forecast = forecast,
             geo = locationState.position,
-            onDismiss = { visibilityForecast = null }
+            onSelectSector = { newSector ->
+                val geo = locationState.position
+                if (geo != null) {
+                    sectorForecast = MoonAstronomy.calculateSectorVisibilityForecast(
+                        geo = geo,
+                        sector = newSector,
+                        startEpochMillis = System.currentTimeMillis()
+                    )
+                }
+            },
+            onDismiss = { sectorForecast = null }
         )
     }
 
@@ -435,7 +449,8 @@ private fun CelestialTelemetryCard(
     geo: GeoPosition?,
     locationStatus: String,
     declinationDeg: Double,
-    cameraPointing: Pair<Double, Double>?
+    cameraPointing: Pair<Double, Double>?,
+    aimedSector: CompassSector
 ) {
     val headerTitle = if (trackedBody == TrackedBody.SUN) "SUN AR TRACKER" else "MOON AR TRACKER"
     val headerColor = if (trackedBody == TrackedBody.SUN) Color(0xFFFFB74D) else Color(0xFFFFD54F)
@@ -551,7 +566,7 @@ private fun CelestialTelemetryCard(
             )
             Text(
                 text = cameraPointing?.let { (az, alt) ->
-                    String.format("Cam: %.0f deg / %+.0f deg (Decl %+.1f)", az, alt, declinationDeg)
+                    String.format("Aim: %s %.0f deg / %+.0f deg (Decl %+.1f)", aimedSector.shortLabel, az, alt, declinationDeg)
                 } ?: "",
                 color = Color(0xFF94A3B8),
                 fontSize = 11.sp,
@@ -562,23 +577,24 @@ private fun CelestialTelemetryCard(
 }
 
 @Composable
-private fun MoonVisibilityDialog(
-    forecast: MoonVisibilityForecast,
+private fun MoonSectorVisibilityDialog(
+    forecast: MoonSectorVisibilityForecast,
     geo: GeoPosition?,
+    onSelectSector: (CompassSector) -> Unit,
     onDismiss: () -> Unit
 ) {
     val timeFmt = remember { SimpleDateFormat("EEE, MMM d  HH:mm", Locale.getDefault()) }
     val now = System.currentTimeMillis()
 
-    fun formatRelative(targetMillis: Long): String {
-        val diffMin = ((targetMillis - now) / 60_000L).coerceAtLeast(0L)
+    fun formatDuration(diffMillis: Long): String {
+        val diffMin = (diffMillis / 60_000L).coerceAtLeast(0L)
         val days = diffMin / 1440L
         val hours = (diffMin % 1440L) / 60L
         val mins = diffMin % 60L
         return when {
-            days > 0 -> "in ${days}d ${hours}h ${mins}m"
-            hours > 0 -> "in ${hours}h ${mins}m"
-            else -> "in ${mins}m"
+            days > 0 -> "${days}d ${hours}h ${mins}m"
+            hours > 0 -> "${hours}h ${mins}m"
+            else -> "${mins}m"
         }
     }
 
@@ -586,22 +602,42 @@ private fun MoonVisibilityDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = if (forecast.isCurrentlyVisible) "Moon Visible Now" else "Next Moon Visibility",
-                color = if (forecast.isCurrentlyVisible) Color(0xFF4ADE80) else Color(0xFFFFD54F),
-                fontWeight = FontWeight.Bold
+                text = "Moon in ${forecast.sector.shortLabel} (${forecast.sector.rangeLabel})",
+                color = if (forecast.isCurrentlyVisibleInSector) Color(0xFF4ADE80) else Color(0xFFFFD54F),
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp
             )
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Quick quadrant selector row (defaults to current camera aim)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    for (sec in CompassSector.entries) {
+                        FilterChip(
+                            selected = sec == forecast.sector,
+                            onClick = { onSelectSector(sec) },
+                            label = { Text(sec.shortLabel, fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF1D4ED8),
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
+
                 Text(
                     text = forecast.summaryNote,
                     color = Color(0xFFE2E8F0),
                     fontSize = 13.sp
                 )
+
                 geo?.let {
                     Text(
                         text = String.format(
-                            "Observer: %.4f, %.4f | Height: %.1f m\nHorizon Dip: -%.3f deg (Threshold: %.2f deg)",
+                            "Pos: %.4f, %.4f | Height: %.1f m\nHorizon Dip: -%.3f deg (Threshold: %.2f deg)",
                             it.latitudeDeg,
                             it.longitudeDeg,
                             forecast.observerAltitudeMeters,
@@ -613,36 +649,64 @@ private fun MoonVisibilityDialog(
                         fontFamily = FontFamily.Monospace
                     )
                 }
+
                 Text(
-                    text = String.format("Current Altitude: %+.2f deg", forecast.currentAltitudeDeg),
+                    text = String.format(
+                        "Moon Now: Az %.1f deg | Alt %+.1f deg",
+                        forecast.currentAzimuthDeg,
+                        forecast.currentAltitudeDeg
+                    ),
                     color = Color.White,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace
                 )
-                forecast.nextRiseMillis?.let { riseMs ->
-                    val azStr = forecast.nextRiseAzimuthDeg?.let { String.format(" (Az %.1f deg)", it) } ?: ""
+
+                forecast.windowStartMillis?.let { startMs ->
+                    val enterMeta = if (forecast.enterAzimuthDeg != null && forecast.enterAltitudeDeg != null) {
+                        String.format("Az %.1f deg, Alt %+.1f deg", forecast.enterAzimuthDeg, forecast.enterAltitudeDeg)
+                    } else {
+                        ""
+                    }
+                    val startLabel = if (forecast.isCurrentlyVisibleInSector) {
+                        "Visible Now ($enterMeta)"
+                    } else {
+                        "Enters ${forecast.sector.shortLabel}:\n${timeFmt.format(Date(startMs))} (in ${formatDuration(startMs - now)})\n$enterMeta"
+                    }
                     Text(
-                        text = "Next Moonrise:\n${timeFmt.format(Date(riseMs))} (${formatRelative(riseMs)})$azStr",
+                        text = startLabel,
                         color = Color(0xFFFFE082),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace
                     )
                 }
-                forecast.nextPeakMillis?.let { peakMs ->
-                    val peakAltStr = forecast.nextPeakAltitudeDeg?.let { String.format("Max Alt %+.1f deg", it) } ?: ""
+
+                forecast.peakMillis?.let { peakMs ->
+                    val peakMeta = if (forecast.peakAzimuthDeg != null && forecast.peakAltitudeDeg != null) {
+                        String.format("Max Alt %+.1f deg at Az %.1f deg", forecast.peakAltitudeDeg, forecast.peakAzimuthDeg)
+                    } else {
+                        ""
+                    }
                     Text(
-                        text = "Peak Altitude:\n${timeFmt.format(Date(peakMs))} ($peakAltStr)",
+                        text = "Peak in ${forecast.sector.shortLabel}:\n${timeFmt.format(Date(peakMs))}\n$peakMeta",
                         color = Color(0xFFCBD5E1),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace
                     )
                 }
-                forecast.nextSetMillis?.let { setMs ->
-                    val azStr = forecast.nextSetAzimuthDeg?.let { String.format(" (Az %.1f deg)", it) } ?: ""
+
+                forecast.windowEndMillis?.let { endMs ->
+                    val durationStr = forecast.windowStartMillis?.let { startMs ->
+                        " (visible ${formatDuration(endMs - startMs)})"
+                    } ?: ""
+                    val exitMeta = if (forecast.exitAzimuthDeg != null && forecast.exitAltitudeDeg != null) {
+                        String.format("Az %.1f deg, Alt %+.1f deg", forecast.exitAzimuthDeg, forecast.exitAltitudeDeg)
+                    } else {
+                        ""
+                    }
                     Text(
-                        text = "Next Moonset:\n${timeFmt.format(Date(setMs))} (${formatRelative(setMs)})$azStr",
+                        text = "Exits ${forecast.sector.shortLabel}:\n${timeFmt.format(Date(endMs))}$durationStr\n$exitMeta",
                         color = Color(0xFF93C5FD),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace
                     )
                 }

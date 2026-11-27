@@ -4,16 +4,16 @@ A real-time celestial Augmented Reality Android application that reads the devic
 
 ## Features
 
-- **Lunar Ephemeris & Visibility Forecast (`astronomy/MoonAstronomy.kt`)**:
-  - Jean Meeus (*Astronomical Algorithms*, 2nd ed., Ch. 47) truncated ELP-2000/82 periodic series, nutation & true obliquity (Ch. 22), GAST (Ch. 12), WGS-84 topocentric parallax (Ch. 40), Bennett atmospheric refraction (Ch. 16), and lunar phase/bright-limb angle (Ch. 48).
-  - **Moon Visibility** button calculates when the Moon will next rise, reach peak altitude, and set from the phone's current latitude, longitude, and height (including geometric horizon dip from observer elevation).
+- **Aimed Compass Sector Moon Visibility (`astronomy/MoonAstronomy.kt`)**:
+  - Tap **Moon in NE / SE / SW / NW** (automatically matched to the direction your camera is pointing) to calculate when the Moon will be visible above your elevation-adjusted horizon inside that compass quadrant (`NE: N-E`, `SE: E-S`, `SW: S-W`, `NW: W-N`), including entry time, peak altitude, exit time, and duration.
+  - Uses Jean Meeus (*Astronomical Algorithms*, 2nd ed., Ch. 47) truncated ELP-2000/82 series, WGS-84 topocentric parallax, Bennett atmospheric refraction, and geometric horizon dip from phone height.
 - **Solar Ephemeris & AR Mode (`astronomy/SunAstronomy.kt`)**:
-  - **Show Sun / Show Moon** toggle switches the live AR overlay, 24-hour sky trajectory arc, off-screen guidance arrow, and telemetry HUD between the Moon and the Sun (Meeus Ch. 25 solar coordinates + twilight phase).
-- **Sensor-Fused Celestial AR (`sensors/OrientationSensorManager.kt`, `ar/ArProjection.kt`, `ui/ArOverlayCanvas.kt`)**:
-  - Uses `TYPE_ROTATION_VECTOR` (with accelerometer + magnetometer fallback), Gram-Schmidt orthonormalized low-pass smoothing, display rotation remapping, `GeomagneticField` true-north declination, and Camera2 physical FOV intrinsics.
+  - Tap **Show Sun / Show Moon** to switch the live AR overlay, 24-hour trajectory arc, guidance arrow, and HUD between the Moon and the Sun.
+- **In-Place APK Updates**:
+  - Uses a committed fixed `app/debug.keystore` and auto-incrementing `versionCode` tied to `GITHUB_RUN_NUMBER` so new GitHub Releases install directly over previous versions without uninstalling.
 
 ## Building & Releasing an APK with GitHub Actions
 
-1. Upload the extracted project files (keeping `.github/workflows/build-apk.yml` and `app/src/main/AndroidManifest.xml` in place) to a GitHub repository.
+1. Upload the extracted project files (keeping `.github/workflows/build-apk.yml`, `app/debug.keystore`, and `app/src/main/AndroidManifest.xml` in place) to a GitHub repository.
 2. Push to `main`/`master` or trigger **Build Moon AR Tracker APK** manually in the **Actions** tab.
-3. Once the workflow finishes, download `MoonARTracker-v1.0.<run_number>-debug.apk` directly from the repository's **Releases** tab (it is also uploaded as a workflow artifact).
+3. Download `MoonARTracker-v1.0.<run_number>-debug.apk` from the **Releases** tab.
