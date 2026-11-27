@@ -2,10 +2,12 @@ package com.moonartracker
 
 import com.moonartracker.ar.ArProjection
 import com.moonartracker.ar.CameraFov
+import com.moonartracker.astronomy.CompassSector
 import com.moonartracker.astronomy.GeoPosition
 import com.moonartracker.astronomy.MoonAstronomy
 import com.moonartracker.astronomy.SunAstronomy
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -13,9 +15,6 @@ class MoonAstronomyTest {
 
     @Test
     fun meeusExample47a_geocentricEclipticMatchesReference() {
-        // Jean Meeus, Astronomical Algorithms (2nd ed.), Example 47.a:
-        // 1992 April 12, 0h TD -> JDE = 2448724.5
-        // Expected: lambda = 133.162655 deg, beta = -3.229126 deg, Delta = 368409.7 km
         val (lambdaDeg, betaDeg, distKm) = MoonAstronomy.calculateGeocentricEcliptic(2448724.5)
 
         assertEquals(133.162655, lambdaDeg, 0.015)
@@ -25,9 +24,6 @@ class MoonAstronomyTest {
 
     @Test
     fun meeusExample25a_sunGeocentricEclipticMatchesReference() {
-        // Jean Meeus, Astronomical Algorithms (2nd ed.), Example 25.a:
-        // 1992 October 13, 0h TD -> JDE = 2448908.5
-        // Expected: apparent lambda ~ 199.90895 deg, radius ~ 0.99766 AU
         val (sunLonDeg, distAu) = SunAstronomy.calculateGeocentricEcliptic(2448908.5)
 
         assertEquals(199.90895, sunLonDeg, 0.01)
@@ -37,7 +33,6 @@ class MoonAstronomyTest {
     @Test
     fun topocentricPosition_returnsValidRangesAndParallax() {
         val geo = GeoPosition(latitudeDeg = 60.5544, longitudeDeg = -151.2583, altitudeMeters = 20.0)
-        // 2026-11-27 12:00:00 UTC
         val epochMillis = 1795694400000L
         val pos = MoonAstronomy.calculateMoonPosition(geo, epochMillis)
 
@@ -49,24 +44,36 @@ class MoonAstronomyTest {
     }
 
     @Test
-    fun moonVisibilityForecast_accountsForObserverHeightHorizonDip() {
+    fun compassSector_mapsAzimuthQuadrantsCorrectly() {
+        assertEquals(CompassSector.NE, CompassSector.fromAzimuth(45.0))
+        assertEquals(CompassSector.SE, CompassSector.fromAzimuth(135.0))
+        assertEquals(CompassSector.SW, CompassSector.fromAzimuth(225.0))
+        assertEquals(CompassSector.NW, CompassSector.fromAzimuth(315.0))
+    }
+
+    @Test
+    fun sectorVisibilityForecast_findsValidSeAndSwWindowsWithHorizonDip() {
         val seaLevel = GeoPosition(latitudeDeg = 40.0, longitudeDeg = -74.0, altitudeMeters = 0.0)
         val mountain = GeoPosition(latitudeDeg = 40.0, longitudeDeg = -74.0, altitudeMeters = 3000.0)
         val epochMillis = 1795694400000L
 
-        val fSea = MoonAstronomy.calculateVisibilityForecast(seaLevel, epochMillis)
-        val fMtn = MoonAstronomy.calculateVisibilityForecast(mountain, epochMillis)
+        val fSe = MoonAstronomy.calculateSectorVisibilityForecast(seaLevel, CompassSector.SE, epochMillis)
+        val fSw = MoonAstronomy.calculateSectorVisibilityForecast(mountain, CompassSector.SW, epochMillis)
 
-        assertEquals(0.0, fSea.horizonDipDeg, 1e-6)
-        assertTrue("Higher elevation should dip horizon further", fMtn.horizonDipDeg > 1.5)
-        assertTrue("Should find rise or set event at mid-latitude", fSea.nextRiseMillis != null || fSea.nextSetMillis != null)
+        assertEquals(0.0, fSe.horizonDipDeg, 1e-6)
+        assertTrue("Higher elevation should dip horizon further", fSw.horizonDipDeg > 1.5)
+        assertNotNull("Should find SE visibility window", fSe.windowStartMillis)
+        assertNotNull("Should find SW visibility window", fSw.windowStartMillis)
+
+        // Verify midpoint of SE window is actually above horizon and inside E-S [90, 180)
+        val midSe = (fSe.windowStartMillis!! + (fSe.windowEndMillis ?: (fSe.windowStartMillis!! + 3600_000L))) / 2L
+        val midPos = MoonAstronomy.calculateMoonPosition(seaLevel, midSe)
+        assertTrue("Midpoint should be in E-S sector", midPos.azimuthDeg in 90.0..180.0)
+        assertTrue("Midpoint should be above horizon threshold", midPos.altitudeDeg >= fSe.visibilityThresholdDeg)
     }
 
     @Test
     fun arProjection_targetDirectlyAheadProjectsToScreenCenter() {
-        // Device held upright facing True North with 0 deg declination:
-        // Device +X = East (1,0,0), Device +Y = Up (0,0,1), Device +Z = South (0,-1,0)
-        // So rear camera (-Z) points North (0,1,0).
         val deviceToWorld = floatArrayOf(
             1f, 0f, 0f,
             0f, 0f, -1f,

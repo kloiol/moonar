@@ -16,6 +16,30 @@ data class GeoPosition(
     val altitudeMeters: Double = 0.0
 )
 
+enum class CompassSector(
+    val shortLabel: String,
+    val rangeLabel: String,
+    val startAzDeg: Double,
+    val endAzDeg: Double
+) {
+    NE("NE", "N - E (0 to 90 deg)", 0.0, 90.0),
+    SE("SE", "E - S (90 to 180 deg)", 90.0, 180.0),
+    SW("SW", "S - W (180 to 270 deg)", 180.0, 270.0),
+    NW("NW", "W - N (270 to 360 deg)", 270.0, 360.0);
+
+    companion object {
+        fun fromAzimuth(azimuthDeg: Double): CompassSector {
+            val az = MoonAstronomy.normalize360(azimuthDeg)
+            return when {
+                az < 90.0 -> NE
+                az < 180.0 -> SE
+                az < 270.0 -> SW
+                else -> NW
+            }
+        }
+    }
+}
+
 data class MoonPosition(
     val azimuthDeg: Double,           // 0 = True North, 90 = East, 180 = South, 270 = West
     val altitudeDeg: Double,          // Apparent topocentric altitude (includes refraction if enabled)
@@ -38,18 +62,23 @@ data class SkyPoint(
     val altitudeDeg: Double
 )
 
-data class MoonVisibilityForecast(
-    val isCurrentlyVisible: Boolean,
+data class MoonSectorVisibilityForecast(
+    val sector: CompassSector,
+    val isCurrentlyVisibleInSector: Boolean,
+    val currentAzimuthDeg: Double,
     val currentAltitudeDeg: Double,
     val observerAltitudeMeters: Double,
     val horizonDipDeg: Double,
     val visibilityThresholdDeg: Double,
-    val nextRiseMillis: Long?,
-    val nextRiseAzimuthDeg: Double?,
-    val nextSetMillis: Long?,
-    val nextSetAzimuthDeg: Double?,
-    val nextPeakMillis: Long?,
-    val nextPeakAltitudeDeg: Double?,
+    val windowStartMillis: Long?,
+    val enterAzimuthDeg: Double?,
+    val enterAltitudeDeg: Double?,
+    val windowEndMillis: Long?,
+    val exitAzimuthDeg: Double?,
+    val exitAltitudeDeg: Double?,
+    val peakMillis: Long?,
+    val peakAzimuthDeg: Double?,
+    val peakAltitudeDeg: Double?,
     val summaryNote: String
 )
 
@@ -129,16 +158,10 @@ object MoonAstronomy {
         intArrayOf(0, 1, 0, 1, -1794)
     )
 
-    /**
-     * Converts Unix epoch milliseconds (UTC) to Julian Date (UT).
-     */
     fun epochMillisToJulianDate(epochMillis: Long): Double {
         return epochMillis / 86400000.0 + 2440587.5
     }
 
-    /**
-     * Approximate Delta-T (TT - UT) in seconds for contemporary dates (2020-2040 ~ 69.2s).
-     */
     fun approxDeltaTSeconds(jdUt: Double): Double {
         val year = 2000.0 + (jdUt - 2451545.0) / 365.25
         return when {
@@ -154,9 +177,6 @@ object MoonAstronomy {
         }
     }
 
-    /**
-     * Geometric horizon dip (degrees) caused by observer height above the reference ellipsoid.
-     */
     fun calculateHorizonDipDeg(altitudeMeters: Double): Double {
         if (altitudeMeters <= 0.0) return 0.0
         val hKm = altitudeMeters / 1000.0
@@ -164,10 +184,6 @@ object MoonAstronomy {
         return acos(ratio) * RAD2DEG
     }
 
-    /**
-     * Computes geocentric ecliptic longitude (deg), latitude (deg), and distance (km)
-     * for a given Julian Ephemeris Date (JDE / TT).
-     */
     fun calculateGeocentricEcliptic(jde: Double): Triple<Double, Double, Double> {
         val t = (jde - 2451545.0) / 36525.0
         val t2 = t * t
@@ -213,7 +229,6 @@ object MoonAstronomy {
             sumR += term[5] * eFactor * cos(arg)
         }
 
-        // Additional additive terms for longitude (Meeus p. 338)
         sumL += 3958.0 * sin(a1) +
             1962.0 * sin((lp - f) * DEG2RAD) +
             318.0 * sin(a2)
@@ -233,7 +248,6 @@ object MoonAstronomy {
             sumB += term[4] * eFactor * sin(arg)
         }
 
-        // Additional additive terms for latitude (Meeus p. 338)
         sumB += -2235.0 * sin(lp * DEG2RAD) +
             382.0 * sin(a3) +
             175.0 * sin((a1 - f * DEG2RAD)) +
@@ -248,10 +262,6 @@ object MoonAstronomy {
         return Triple(lambdaDeg, betaDeg, distanceKm)
     }
 
-    /**
-     * Computes full topocentric Moon position, phase, and orientation for the given
-     * observer location and UTC timestamp.
-     */
     fun calculateMoonPosition(
         geo: GeoPosition,
         epochMillis: Long,
@@ -263,7 +273,6 @@ object MoonAstronomy {
 
         val (lambdaDeg, betaDeg, distanceKm) = calculateGeocentricEcliptic(jde)
 
-        // Nutation in longitude and obliquity (Meeus Ch. 22, low-precision ~0.5 arcsec)
         val omega = normalize360(125.04452 - 1934.136261 * t) * DEG2RAD
         val lSun = normalize360(280.4665 + 36000.7698 * t) * DEG2RAD
         val lMoon = normalize360(218.3165 + 481267.8813 * t) * DEG2RAD
@@ -278,7 +287,6 @@ object MoonAstronomy {
         val apparentLambdaRad = normalize360(lambdaDeg + deltaPsiArcsec / 3600.0) * DEG2RAD
         val betaRad = betaDeg * DEG2RAD
 
-        // Geocentric Right Ascension & Declination
         val sinLambda = sin(apparentLambdaRad)
         val cosLambda = cos(apparentLambdaRad)
         val sinEps = sin(trueEpsRad)
@@ -287,7 +295,6 @@ object MoonAstronomy {
         val raGeoRad = atan2(sinLambda * cosEps - tan(betaRad) * sinEps, cosLambda)
         val decGeoRad = asin((sin(betaRad) * cosEps + cos(betaRad) * sinEps * sinLambda).coerceIn(-1.0, 1.0))
 
-        // Greenwich Mean & Apparent Sidereal Time (Meeus Ch. 12)
         val tUt = (jdUt - 2451545.0) / 36525.0
         val gmstDeg = normalize360(
             280.46061837 +
@@ -298,10 +305,8 @@ object MoonAstronomy {
         val gastDeg = normalize360(gmstDeg + (deltaPsiArcsec / 3600.0) * cosEps)
         val lstRad = normalize360(gastDeg + geo.longitudeDeg) * DEG2RAD
 
-        // Geocentric local hour angle
         val hGeoRad = lstRad - raGeoRad
 
-        // WGS-84 observer geocentric coordinates (Meeus Ch. 11 & Ch. 40)
         val latRad = geo.latitudeDeg * DEG2RAD
         val bOverA = 1.0 - WGS84_FLATTENING
         val u = atan(bOverA * tan(latRad))
@@ -309,10 +314,8 @@ object MoonAstronomy {
         val rhoSinPhiPrime = bOverA * sin(u) + (altKm / EARTH_EQUATORIAL_RADIUS_KM) * sin(latRad)
         val rhoCosPhiPrime = cos(u) + (altKm / EARTH_EQUATORIAL_RADIUS_KM) * cos(latRad)
 
-        // Equatorial horizontal parallax
         val sinPi = (EARTH_EQUATORIAL_RADIUS_KM / distanceKm).coerceIn(-1.0, 1.0)
 
-        // Rigorous topocentric RA and Dec (Meeus eq. 40.2 & 40.3)
         val cosDecGeo = cos(decGeoRad)
         val sinDecGeo = sin(decGeoRad)
         val deltaRaRad = atan2(
@@ -326,7 +329,6 @@ object MoonAstronomy {
             cosDecGeo - rhoCosPhiPrime * sinPi * cos(hGeoRad)
         )
 
-        // Horizontal coordinates (Azimuth from North clockwise, Altitude)
         val sinLat = sin(latRad)
         val cosLat = cos(latRad)
         val sinDec = sin(decTopoRad)
@@ -337,11 +339,9 @@ object MoonAstronomy {
         val geomAltRad = asin((sinLat * sinDec + cosLat * cosDec * cosH).coerceIn(-1.0, 1.0))
         val geomAltDeg = geomAltRad * RAD2DEG
 
-        // Azimuth measured clockwise from North (0 = N, 90 = E, 180 = S, 270 = W)
         val azFromSouthRad = atan2(sinH, cosH * sinLat - tan(decTopoRad) * cosLat)
         val azimuthDeg = normalize360(azFromSouthRad * RAD2DEG + 180.0)
 
-        // Atmospheric refraction (Bennett's formula, Meeus eq. 16.4)
         val apparentAltDeg = if (applyRefraction && geomAltDeg > -1.0) {
             val hClamped = geomAltDeg.coerceAtLeast(-1.0)
             val rArcmin = 1.02 / tan((hClamped + 10.3 / (hClamped + 5.11)) * DEG2RAD)
@@ -350,17 +350,14 @@ object MoonAstronomy {
             geomAltDeg
         }
 
-        // Parallactic angle q (angle between zenith and celestial north pole at Moon)
         val parallacticAngleDeg = atan2(sinH, tan(latRad) * cosDec - sinDec * cosH) * RAD2DEG
 
-        // Solar position for lunar phase, illumination, and bright limb angle (Meeus Ch. 48)
         val (sunLonDeg, sunDistAu) = SunAstronomy.calculateGeocentricEcliptic(jde)
         val sunDistKm = sunDistAu * 149_597_870.7
         val sunLonRad = sunLonDeg * DEG2RAD
         val sunRaRad = atan2(sin(sunLonRad) * cosEps, cos(sunLonRad))
         val sunDecRad = asin((sin(sunLonRad) * sinEps).coerceIn(-1.0, 1.0))
 
-        // Geocentric elongation psi
         val cosPsi = (sin(sunDecRad) * sinDecGeo + cos(sunDecRad) * cosDecGeo * cos(sunRaRad - raGeoRad))
             .coerceIn(-1.0, 1.0)
         val psiRad = acos(cosPsi)
@@ -371,14 +368,12 @@ object MoonAstronomy {
         val isWaxing = lonDiff < 180.0
         val phaseName = classifyMoonPhase(lonDiff)
 
-        // Position angle of the bright limb (Meeus eq. 48.5)
         val brightLimbRad = atan2(
             cos(sunDecRad) * sin(sunRaRad - raGeoRad),
             sin(sunDecRad) * cosDecGeo - cos(sunDecRad) * sinDecGeo * cos(sunRaRad - raGeoRad)
         )
         val brightLimbDeg = normalize360(brightLimbRad * RAD2DEG)
 
-        // Apparent angular diameter
         val angularDiameterDeg = 2.0 * asin((MOON_RADIUS_KM / distanceKm).coerceIn(-1.0, 1.0)) * RAD2DEG
 
         return MoonPosition(
@@ -398,133 +393,136 @@ object MoonAstronomy {
         )
     }
 
+    private fun isVisibleInSector(
+        pos: MoonPosition,
+        sector: CompassSector,
+        dipDeg: Double
+    ): Boolean {
+        val thresholdDeg = -(pos.angularDiameterDeg * 0.5) - dipDeg
+        if (pos.altitudeDeg < thresholdDeg) return false
+        val az = normalize360(pos.azimuthDeg)
+        return az >= sector.startAzDeg && az < sector.endAzDeg
+    }
+
     /**
-     * Calculates when the Moon will next be visible (upper limb above the observer's
-     * elevation-adjusted horizon) from [geo] starting at [startEpochMillis].
+     * Calculates when the Moon will be visible (above the observer's elevation-adjusted horizon)
+     * AND inside the target compass [sector] (e.g. SE = E to S, SW = S to W).
      *
-     * Accounts for WGS-84 topocentric parallax, atmospheric refraction, Moon semi-diameter,
-     * and geometric horizon dip from [geo.altitudeMeters]. Searches up to [maxSearchDays] days
-     * to handle high-latitude polar regions where the Moon can stay below/above horizon for days.
+     * Scans forward up to [maxSearchDays] days (default 30 days = full lunar cycle) in 10-minute
+     * steps and refines entry/exit boundaries with binary search to ~1-second precision.
      */
-    fun calculateVisibilityForecast(
+    fun calculateSectorVisibilityForecast(
         geo: GeoPosition,
+        sector: CompassSector,
         startEpochMillis: Long,
-        maxSearchDays: Int = 15
-    ): MoonVisibilityForecast {
+        maxSearchDays: Int = 30
+    ): MoonSectorVisibilityForecast {
         val dipDeg = calculateHorizonDipDeg(geo.altitudeMeters)
         val nowPos = calculateMoonPosition(geo, startEpochMillis, applyRefraction = true)
         val thresholdDeg = -(nowPos.angularDiameterDeg * 0.5) - dipDeg
-        val isCurrentlyVisible = nowPos.altitudeDeg >= thresholdDeg
+        val currentlyInSector = isVisibleInSector(nowPos, sector, dipDeg)
 
-        val stepMillis = 10 * 60_000L // 10-minute coarse scan
+        val stepMillis = 10 * 60_000L
         val endMillis = startEpochMillis + maxSearchDays * 86_400_000L
 
-        var nextRiseMillis: Long? = null
-        var nextRiseAz: Double? = null
-        var nextSetMillis: Long? = null
-        var nextSetAz: Double? = null
+        var windowStart: Long? = if (currentlyInSector) startEpochMillis else null
+        var windowEnd: Long? = null
 
         var prevT = startEpochMillis
-        var prevMargin = nowPos.altitudeDeg - thresholdDeg
+        var prevIn = currentlyInSector
 
         var t = startEpochMillis + stepMillis
-        while (t <= endMillis && (nextRiseMillis == null || nextSetMillis == null)) {
+        while (t <= endMillis) {
             val pos = calculateMoonPosition(geo, t, applyRefraction = true)
-            val currThreshold = -(pos.angularDiameterDeg * 0.5) - dipDeg
-            val currMargin = pos.altitudeDeg - currThreshold
+            val currIn = isVisibleInSector(pos, sector, dipDeg)
 
-            if (prevMargin < 0.0 && currMargin >= 0.0 && nextRiseMillis == null) {
-                val crossing = bisectCrossing(geo, prevT, t, dipDeg, rising = true)
-                nextRiseMillis = crossing
-                nextRiseAz = calculateMoonPosition(geo, crossing, applyRefraction = true).azimuthDeg
-            } else if (prevMargin >= 0.0 && currMargin < 0.0 && nextSetMillis == null) {
-                // If not currently visible, wait until after the next rise to record the paired set
-                if (isCurrentlyVisible || nextRiseMillis != null) {
-                    val crossing = bisectCrossing(geo, prevT, t, dipDeg, rising = false)
-                    nextSetMillis = crossing
-                    nextSetAz = calculateMoonPosition(geo, crossing, applyRefraction = true).azimuthDeg
-                }
+            if (!prevIn && currIn && windowStart == null) {
+                windowStart = bisectSectorTransition(geo, sector, prevT, t, dipDeg, entering = true)
+            } else if (prevIn && !currIn && windowStart != null && windowEnd == null) {
+                windowEnd = bisectSectorTransition(geo, sector, prevT, t, dipDeg, entering = false)
+                break
             }
 
             prevT = t
-            prevMargin = currMargin
+            prevIn = currIn
             t += stepMillis
         }
 
-        // Find peak altitude during the current or next visible window (bounded to 36h window)
-        val peakWindowStart = if (isCurrentlyVisible) startEpochMillis else (nextRiseMillis ?: startEpochMillis)
-        val peakWindowEnd = when {
-            nextSetMillis != null && nextSetMillis > peakWindowStart -> nextSetMillis
-            else -> peakWindowStart + 24 * 3_600_000L
-        }.coerceAtMost(peakWindowStart + 36 * 3_600_000L)
+        val enterPos = windowStart?.let { calculateMoonPosition(geo, it, applyRefraction = true) }
+        val exitPos = windowEnd?.let { calculateMoonPosition(geo, it, applyRefraction = true) }
 
         var peakTime: Long? = null
         var peakAlt = -999.0
-        if (isCurrentlyVisible || nextRiseMillis != null) {
-            var scan = peakWindowStart
-            while (scan <= peakWindowEnd) {
-                val alt = calculateMoonPosition(geo, scan, applyRefraction = true).altitudeDeg
-                if (alt > peakAlt) {
-                    peakAlt = alt
+        var peakAz: Double? = null
+
+        if (windowStart != null) {
+            val scanEnd = (windowEnd ?: (windowStart + 12 * 3_600_000L))
+                .coerceAtMost(windowStart + 24 * 3_600_000L)
+            var scan = windowStart
+            while (scan <= scanEnd) {
+                val p = calculateMoonPosition(geo, scan, applyRefraction = true)
+                if (p.altitudeDeg > peakAlt) {
+                    peakAlt = p.altitudeDeg
+                    peakAz = p.azimuthDeg
                     peakTime = scan
                 }
-                scan += 10 * 60_000L
+                scan += 5 * 60_000L
             }
         }
 
         val summaryNote = when {
-            isCurrentlyVisible && nextSetMillis != null ->
-                "The Moon is currently visible from your position and elevation."
-            isCurrentlyVisible && nextSetMillis == null ->
-                "The Moon stays above your elevation-adjusted horizon for the next $maxSearchDays days."
-            !isCurrentlyVisible && nextRiseMillis != null ->
-                "The Moon is currently below your horizon. See the next rise window below."
+            currentlyInSector ->
+                "The Moon is visible in ${sector.shortLabel} (${sector.rangeLabel}) right now."
+            windowStart != null ->
+                "Next visible window in ${sector.shortLabel} (${sector.rangeLabel}) found below."
             else ->
-                "The Moon remains below your horizon for the next $maxSearchDays days."
+                "The Moon does not pass visibly through ${sector.shortLabel} in the next $maxSearchDays days from this latitude."
         }
 
-        return MoonVisibilityForecast(
-            isCurrentlyVisible = isCurrentlyVisible,
+        return MoonSectorVisibilityForecast(
+            sector = sector,
+            isCurrentlyVisibleInSector = currentlyInSector,
+            currentAzimuthDeg = nowPos.azimuthDeg,
             currentAltitudeDeg = nowPos.altitudeDeg,
             observerAltitudeMeters = geo.altitudeMeters,
             horizonDipDeg = dipDeg,
             visibilityThresholdDeg = thresholdDeg,
-            nextRiseMillis = nextRiseMillis,
-            nextRiseAzimuthDeg = nextRiseAz,
-            nextSetMillis = nextSetMillis,
-            nextSetAzimuthDeg = nextSetAz,
-            nextPeakMillis = peakTime,
-            nextPeakAltitudeDeg = if (peakTime != null) peakAlt else null,
+            windowStartMillis = windowStart,
+            enterAzimuthDeg = enterPos?.azimuthDeg,
+            enterAltitudeDeg = enterPos?.altitudeDeg,
+            windowEndMillis = windowEnd,
+            exitAzimuthDeg = exitPos?.azimuthDeg,
+            exitAltitudeDeg = exitPos?.altitudeDeg,
+            peakMillis = peakTime,
+            peakAzimuthDeg = peakAz,
+            peakAltitudeDeg = if (peakTime != null) peakAlt else null,
             summaryNote = summaryNote
         )
     }
 
-    private fun bisectCrossing(
+    private fun bisectSectorTransition(
         geo: GeoPosition,
+        sector: CompassSector,
         tLow: Long,
         tHigh: Long,
         dipDeg: Double,
-        rising: Boolean
+        entering: Boolean
     ): Long {
         var lo = tLow
         var hi = tHigh
-        for (i in 0 until 12) { // 10 min / 2^12 ~ 0.15 sec precision
+        for (i in 0 until 12) {
             val mid = lo + (hi - lo) / 2L
             val pos = calculateMoonPosition(geo, mid, applyRefraction = true)
-            val margin = pos.altitudeDeg - (-(pos.angularDiameterDeg * 0.5) - dipDeg)
-            if (rising) {
-                if (margin < 0.0) lo = mid else hi = mid
+            val inside = isVisibleInSector(pos, sector, dipDeg)
+            if (entering) {
+                if (!inside) lo = mid else hi = mid
             } else {
-                if (margin >= 0.0) lo = mid else hi = mid
+                if (inside) lo = mid else hi = mid
             }
         }
         return lo + (hi - lo) / 2L
     }
 
-    /**
-     * Generates the Moon's apparent sky trajectory over the next [hoursAhead] hours
-     * (and [hoursBehind] hours behind) at [stepMinutes] intervals.
-     */
     fun calculateTrajectory(
         geo: GeoPosition,
         centerEpochMillis: Long,
