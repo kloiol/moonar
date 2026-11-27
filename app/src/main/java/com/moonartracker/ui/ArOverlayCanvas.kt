@@ -21,6 +21,8 @@ import com.moonartracker.ar.ArProjection
 import com.moonartracker.ar.CameraFov
 import com.moonartracker.astronomy.MoonPosition
 import com.moonartracker.astronomy.SkyPoint
+import com.moonartracker.astronomy.SunPosition
+import com.moonartracker.astronomy.TrackedBody
 import com.moonartracker.sensors.OrientationState
 import kotlin.math.PI
 import kotlin.math.abs
@@ -40,22 +42,26 @@ private val CARDINAL_LABELS = listOf(
 )
 
 /**
- * Real-time AR Canvas overlay that projects the Moon, its true illuminated phase,
- * its 24-hour trajectory arc, the horizon line, cardinal directions, and off-screen
- * directional guidance onto the live camera feed.
+ * Real-time AR Canvas overlay that projects either the Moon (with true illuminated phase)
+ * or the Sun, along with its 24-hour trajectory arc, horizon line, cardinal directions,
+ * and off-screen directional guidance onto the live camera feed.
  */
 @Composable
 fun ArOverlayCanvas(
     modifier: Modifier = Modifier,
+    trackedBody: TrackedBody,
     orientation: OrientationState,
     moonPosition: MoonPosition?,
+    sunPosition: SunPosition?,
     trajectory: List<SkyPoint>,
     cameraFov: CameraFov,
     showHorizon: Boolean,
     showTrajectory: Boolean
 ) {
     Canvas(modifier = modifier) {
-        if (!orientation.isReady || moonPosition == null) return@Canvas
+        if (!orientation.isReady) return@Canvas
+        if (trackedBody == TrackedBody.MOON && moonPosition == null) return@Canvas
+        if (trackedBody == TrackedBody.SUN && sunPosition == null) return@Canvas
 
         val w = size.width
         val h = size.height
@@ -70,36 +76,64 @@ fun ArOverlayCanvas(
             drawHorizonAndCardinals(matrix, decl, w, h, cameraFov)
         }
 
-        // 3. Projected 24-hour lunar trajectory arc
+        // 3. Projected 24-hour trajectory arc for active body (Moon or Sun)
         if (showTrajectory && trajectory.size >= 2) {
-            drawMoonTrajectory(trajectory, matrix, decl, w, h, cameraFov)
+            drawTrajectory(trackedBody, trajectory, matrix, decl, w, h, cameraFov)
         }
 
-        // 4. Projected Moon position (on-screen render or off-screen guidance arrow)
-        val moonProj = ArProjection.projectCelestialPoint(
-            azimuthTrueDeg = moonPosition.azimuthDeg,
-            altitudeDeg = moonPosition.altitudeDeg,
-            magneticDeclinationDeg = decl,
-            deviceToWorldMatrix3x3 = matrix,
-            screenWidthPx = w,
-            screenHeightPx = h,
-            cameraFov = cameraFov
-        )
-
-        if (moonProj.isOnScreen) {
-            drawMoonOverlay(
-                center = Offset(moonProj.screenX, moonProj.screenY),
-                moon = moonPosition,
-                pixelsPerDegree = w / cameraFov.horizontalFovDeg.toFloat()
-            )
-        } else {
-            drawOffscreenGuidance(
-                w = w,
-                h = h,
-                directionRad = moonProj.edgeDirectionRad,
-                angularOffsetDeg = moonProj.angularOffsetDeg,
-                isBelowHorizon = moonPosition.altitudeDeg < 0.0
-            )
+        // 4. Projected active celestial body (on-screen render or off-screen guidance arrow)
+        val pixelsPerDegree = w / cameraFov.horizontalFovDeg.toFloat()
+        when (trackedBody) {
+            TrackedBody.MOON -> {
+                val moon = moonPosition!!
+                val proj = ArProjection.projectCelestialPoint(
+                    azimuthTrueDeg = moon.azimuthDeg,
+                    altitudeDeg = moon.altitudeDeg,
+                    magneticDeclinationDeg = decl,
+                    deviceToWorldMatrix3x3 = matrix,
+                    screenWidthPx = w,
+                    screenHeightPx = h,
+                    cameraFov = cameraFov
+                )
+                if (proj.isOnScreen) {
+                    drawMoonOverlay(Offset(proj.screenX, proj.screenY), moon, pixelsPerDegree)
+                } else {
+                    drawOffscreenGuidance(
+                        w = w,
+                        h = h,
+                        directionRad = proj.edgeDirectionRad,
+                        angularOffsetDeg = proj.angularOffsetDeg,
+                        isBelowHorizon = moon.altitudeDeg < 0.0,
+                        bodyLabel = "Moon",
+                        activeColor = Color(0xFFFFD54F)
+                    )
+                }
+            }
+            TrackedBody.SUN -> {
+                val sun = sunPosition!!
+                val proj = ArProjection.projectCelestialPoint(
+                    azimuthTrueDeg = sun.azimuthDeg,
+                    altitudeDeg = sun.altitudeDeg,
+                    magneticDeclinationDeg = decl,
+                    deviceToWorldMatrix3x3 = matrix,
+                    screenWidthPx = w,
+                    screenHeightPx = h,
+                    cameraFov = cameraFov
+                )
+                if (proj.isOnScreen) {
+                    drawSunOverlay(Offset(proj.screenX, proj.screenY), sun, pixelsPerDegree)
+                } else {
+                    drawOffscreenGuidance(
+                        w = w,
+                        h = h,
+                        directionRad = proj.edgeDirectionRad,
+                        angularOffsetDeg = proj.angularOffsetDeg,
+                        isBelowHorizon = sun.altitudeDeg < 0.0,
+                        bodyLabel = "Sun",
+                        activeColor = Color(0xFFFF9800)
+                    )
+                }
+            }
         }
     }
 }
@@ -126,7 +160,6 @@ private fun DrawScope.drawHorizonAndCardinals(
     val horizonColor = Color(0xFF4FC3F7).copy(alpha = 0.50f)
     val dashEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 12f), 0f)
 
-    // Sample horizon every 5 degrees in azimuth
     var prevPt: Offset? = null
     for (azStep in 0..360 step 5) {
         val proj = ArProjection.projectCelestialPoint(
@@ -195,7 +228,8 @@ private fun DrawScope.drawHorizonAndCardinals(
     }
 }
 
-private fun DrawScope.drawMoonTrajectory(
+private fun DrawScope.drawTrajectory(
+    trackedBody: TrackedBody,
     trajectory: List<SkyPoint>,
     matrix: FloatArray,
     declinationDeg: Double,
@@ -203,7 +237,12 @@ private fun DrawScope.drawMoonTrajectory(
     h: Float,
     fov: CameraFov
 ) {
-    val aboveColor = Color(0xFFFFD54F).copy(alpha = 0.65f)
+    val aboveColor = if (trackedBody == TrackedBody.SUN) {
+        Color(0xFFFF9800).copy(alpha = 0.78f)
+    } else {
+        Color(0xFFFFD54F).copy(alpha = 0.65f)
+    }
+    val dotAboveColor = if (trackedBody == TrackedBody.SUN) Color(0xFFFFCC80) else Color(0xFFFFE082)
     val belowColor = Color(0xFF90A4AE).copy(alpha = 0.35f)
     val dashedBelow = PathEffect.dashPathEffect(floatArrayOf(10f, 14f), 0f)
 
@@ -229,7 +268,7 @@ private fun DrawScope.drawMoonTrajectory(
                         color = if (isAbove) aboveColor else belowColor,
                         start = prev,
                         end = curr,
-                        strokeWidth = if (isAbove) 4f else 2.5f,
+                        strokeWidth = if (isAbove) 4.5f else 2.5f,
                         cap = StrokeCap.Round,
                         pathEffect = if (isAbove) null else dashedBelow
                     )
@@ -237,7 +276,7 @@ private fun DrawScope.drawMoonTrajectory(
             }
             if (proj.isOnScreen) {
                 drawCircle(
-                    color = if (pt.altitudeDeg >= 0.0) Color(0xFFFFE082) else Color(0xFF90A4AE),
+                    color = if (pt.altitudeDeg >= 0.0) dotAboveColor else Color(0xFF90A4AE),
                     radius = 4.5f,
                     center = curr
                 )
@@ -255,13 +294,11 @@ private fun DrawScope.drawMoonOverlay(
     pixelsPerDegree: Float
 ) {
     val isBelow = moon.altitudeDeg < 0.0
-    // Real angular radius in pixels, clamped to a minimum visible size for easy AR tracking
     val trueRadiusPx = (moon.angularDiameterDeg.toFloat() * 0.5f) * pixelsPerDegree
     val displayRadius = trueRadiusPx.coerceIn(34f, 68f)
 
     val glowColor = if (isBelow) Color(0xFF90A4AE) else Color(0xFFFFF59D)
 
-    // Soft atmospheric glow halo
     drawCircle(
         brush = Brush.radialGradient(
             colors = listOf(
@@ -275,7 +312,6 @@ private fun DrawScope.drawMoonOverlay(
         center = center
     )
 
-    // Illuminated lunar disk rotated to match bright-limb orientation relative to zenith
     val limbRotationDeg = (moon.brightLimbAngleDeg - moon.parallacticAngleDeg).toFloat()
     drawMoonPhaseDisk(
         center = center,
@@ -285,7 +321,6 @@ private fun DrawScope.drawMoonOverlay(
         dimmed = isBelow
     )
 
-    // Outer AR targeting reticle
     val ringRadius = displayRadius + 16f
     val ringColor = if (isBelow) Color(0xFFB0BEC5).copy(alpha = 0.7f) else Color(0xFFFFD54F)
     drawCircle(
@@ -298,7 +333,6 @@ private fun DrawScope.drawMoonOverlay(
         )
     )
 
-    // Label below Moon reticle
     val labelPaint = Paint().apply {
         color = if (isBelow) android.graphics.Color.LTGRAY else android.graphics.Color.WHITE
         textSize = 32f
@@ -327,10 +361,94 @@ private fun DrawScope.drawMoonOverlay(
     drawContext.canvas.nativeCanvas.drawText(coords, center.x, center.y + ringRadius + 70f, subPaint)
 }
 
-/**
- * Draws a geometrically accurate lunar phase disk where the bright limb faces
- * along [rotationDeg] (0 deg = Up/Zenith, clockwise).
- */
+private fun DrawScope.drawSunOverlay(
+    center: Offset,
+    sun: SunPosition,
+    pixelsPerDegree: Float
+) {
+    val isBelow = sun.altitudeDeg < 0.0
+    val trueRadiusPx = (sun.angularDiameterDeg.toFloat() * 0.5f) * pixelsPerDegree
+    val displayRadius = trueRadiusPx.coerceIn(36f, 70f)
+
+    val glowColor = if (isBelow) Color(0xFFFFAB91) else Color(0xFFFFB300)
+
+    // Solar corona glow
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(
+                glowColor.copy(alpha = if (isBelow) 0.25f else 0.65f),
+                Color(0xFFFF6F00).copy(alpha = if (isBelow) 0.08f else 0.20f),
+                Color.Transparent
+            ),
+            center = center,
+            radius = displayRadius * 2.8f
+        ),
+        radius = displayRadius * 2.8f,
+        center = center
+    )
+
+    // Solar rays
+    val rayColor = if (isBelow) Color(0xFFFFAB91).copy(alpha = 0.55f) else Color(0xFFFFCA28)
+    for (i in 0 until 12) {
+        val angle = (i * 30.0) * PI / 180.0
+        val inner = displayRadius + 6f
+        val outer = displayRadius + 20f
+        drawLine(
+            color = rayColor,
+            start = Offset(center.x + cos(angle).toFloat() * inner, center.y + sin(angle).toFloat() * inner),
+            end = Offset(center.x + cos(angle).toFloat() * outer, center.y + sin(angle).toFloat() * outer),
+            strokeWidth = 3f,
+            cap = StrokeCap.Round
+        )
+    }
+
+    // Solar disk
+    drawCircle(
+        color = if (isBelow) Color(0xFFBCAAA4) else Color(0xFFFFF176),
+        radius = displayRadius,
+        center = center
+    )
+
+    val ringRadius = displayRadius + 24f
+    val ringColor = if (isBelow) Color(0xFFFFAB91).copy(alpha = 0.7f) else Color(0xFFFF9800)
+    drawCircle(
+        color = ringColor,
+        radius = ringRadius,
+        center = center,
+        style = Stroke(
+            width = 3f,
+            pathEffect = if (isBelow) PathEffect.dashPathEffect(floatArrayOf(12f, 10f)) else null
+        )
+    )
+
+    val labelPaint = Paint().apply {
+        color = if (isBelow) android.graphics.Color.LTGRAY else android.graphics.Color.WHITE
+        textSize = 32f
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+        isAntiAlias = true
+        setShadowLayer(8f, 0f, 0f, android.graphics.Color.BLACK)
+    }
+    val subPaint = Paint().apply {
+        color = if (isBelow) android.graphics.Color.LTGRAY else android.graphics.Color.rgb(255, 204, 128)
+        textSize = 26f
+        typeface = Typeface.MONOSPACE
+        textAlign = Paint.Align.CENTER
+        isAntiAlias = true
+        setShadowLayer(6f, 0f, 0f, android.graphics.Color.BLACK)
+    }
+
+    val title = if (isBelow) "SUN (BELOW HORIZON)" else "SUN"
+    val coords = String.format(
+        "Az %.1f deg | Alt %.1f deg | %.4f AU",
+        sun.azimuthDeg,
+        sun.altitudeDeg,
+        sun.distanceAu
+    )
+    drawContext.canvas.nativeCanvas.drawText(title, center.x, center.y + ringRadius + 38f, labelPaint)
+    drawContext.canvas.nativeCanvas.drawText(coords, center.x, center.y + ringRadius + 70f, subPaint)
+}
+
 private fun DrawScope.drawMoonPhaseDisk(
     center: Offset,
     radius: Float,
@@ -344,12 +462,10 @@ private fun DrawScope.drawMoonPhaseDisk(
     withTransform({
         rotate(degrees = rotationDeg - 90f, pivot = center)
     }) {
-        // Dark base disk
         drawCircle(color = darkColor, radius = radius, center = center)
 
         val k = illuminatedFraction.coerceIn(0f, 1f)
         if (k > 0.01f) {
-            // Right semicircle (bright limb side)
             val rect = Rect(
                 offset = Offset(center.x - radius, center.y - radius),
                 size = Size(radius * 2f, radius * 2f)
@@ -363,7 +479,6 @@ private fun DrawScope.drawMoonPhaseDisk(
                 size = rect.size
             )
 
-            // Terminator ellipse
             val terminatorScale = abs(2f * k - 1f)
             val ellipseWidth = (radius * 2f * terminatorScale).coerceAtLeast(0.5f)
             val ellipseRect = Rect(
@@ -386,17 +501,19 @@ private fun DrawScope.drawOffscreenGuidance(
     h: Float,
     directionRad: Float,
     angularOffsetDeg: Double,
-    isBelowHorizon: Boolean
+    isBelowHorizon: Boolean,
+    bodyLabel: String,
+    activeColor: Color
 ) {
     val cx = w * 0.5f
     val cy = h * 0.5f
     val rx = w * 0.40f
-    val ry = min(h * 0.34f, h * 0.5f - 180f).coerceAtLeast(100f)
+    val ry = min(h * 0.34f, h * 0.5f - 200f).coerceAtLeast(100f)
 
     val tipX = cx + cos(directionRad) * rx
     val tipY = cy + sin(directionRad) * ry
 
-    val arrowColor = if (isBelowHorizon) Color(0xFF90A4AE) else Color(0xFFFFD54F)
+    val arrowColor = if (isBelowHorizon) Color(0xFF90A4AE) else activeColor
     val arrowSize = 34f
     val backAngle1 = directionRad + (150.0 * PI / 180.0).toFloat()
     val backAngle2 = directionRad - (150.0 * PI / 180.0).toFloat()
@@ -414,7 +531,13 @@ private fun DrawScope.drawOffscreenGuidance(
     val labelY = tipY - sin(directionRad) * labelDist + 10f
 
     val paint = Paint().apply {
-        color = if (isBelowHorizon) android.graphics.Color.LTGRAY else android.graphics.Color.rgb(255, 224, 130)
+        color = if (isBelowHorizon) {
+            android.graphics.Color.LTGRAY
+        } else if (bodyLabel == "Sun") {
+            android.graphics.Color.rgb(255, 204, 128)
+        } else {
+            android.graphics.Color.rgb(255, 224, 130)
+        }
         textSize = 30f
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         textAlign = Paint.Align.CENTER
@@ -422,6 +545,6 @@ private fun DrawScope.drawOffscreenGuidance(
         setShadowLayer(8f, 0f, 0f, android.graphics.Color.BLACK)
     }
 
-    val text = String.format("Moon %.0f deg", angularOffsetDeg)
+    val text = String.format("%s %.0f deg", bodyLabel, angularOffsetDeg)
     drawContext.canvas.nativeCanvas.drawText(text, labelX, labelY, paint)
 }

@@ -1,22 +1,19 @@
 # Moon AR Tracker (Android / Kotlin)
 
-A real-time celestial Augmented Reality Android application that reads the device's geoposition (GPS), computes the Moon's topocentric position and phase, and overlays the live Moon, its 24-hour trajectory, and the horizon onto the camera feed.
+A real-time celestial Augmented Reality Android application that reads the device's geoposition (GPS + elevation), computes topocentric Moon and Sun positions, and overlays the active body, its 24-hour trajectory, and the horizon onto the camera feed.
 
-## Architecture
+## Features
 
-- **Lunar Ephemeris (`astronomy/MoonAstronomy.kt`)**:
-  - Jean Meeus (*Astronomical Algorithms*, 2nd ed., Ch. 47) truncated ELP-2000/82 periodic series for geocentric ecliptic longitude, latitude, and distance.
-  - Nutation & true obliquity (Ch. 22), Greenwich Apparent Sidereal Time (Ch. 12), and rigorous WGS-84 topocentric parallax correction (Ch. 40) using observer latitude, longitude, and elevation.
-  - Bennett's atmospheric refraction correction (Ch. 16), lunar illumination percentage, phase classification, and position angle of the bright limb (Ch. 48).
-- **Sensor-Fused Celestial AR (`sensors/OrientationSensorManager.kt`, `ar/ArProjection.kt`)**:
-  - Uses Android's `TYPE_ROTATION_VECTOR` (with accelerometer + magnetometer fallback), Gram-Schmidt orthonormalized low-pass smoothing, display rotation remapping, and `GeomagneticField` declination to convert Magnetic North to True North.
-  - Reads rear camera physical focal length and sensor dimensions via CameraX/Camera2 to project True North Azimuth/Altitude onto screen pixels with accurate perspective geometry.
-- **Live AR Overlay & HUD (`ui/ArOverlayCanvas.kt`, `MainActivity.kt`)**:
-  - Renders the Moon at its real-time sky position with its true illuminated phase and bright-limb tilt, a 24-hour trajectory arc, a 3D horizon line with cardinal markers, and an off-screen guidance arrow when the Moon is outside the camera view.
-  - Includes a manual GPS override dialog for testing or indoor use.
+- **Lunar Ephemeris & Visibility Forecast (`astronomy/MoonAstronomy.kt`)**:
+  - Jean Meeus (*Astronomical Algorithms*, 2nd ed., Ch. 47) truncated ELP-2000/82 periodic series, nutation & true obliquity (Ch. 22), GAST (Ch. 12), WGS-84 topocentric parallax (Ch. 40), Bennett atmospheric refraction (Ch. 16), and lunar phase/bright-limb angle (Ch. 48).
+  - **Moon Visibility** button calculates when the Moon will next rise, reach peak altitude, and set from the phone's current latitude, longitude, and height (including geometric horizon dip from observer elevation).
+- **Solar Ephemeris & AR Mode (`astronomy/SunAstronomy.kt`)**:
+  - **Show Sun / Show Moon** toggle switches the live AR overlay, 24-hour sky trajectory arc, off-screen guidance arrow, and telemetry HUD between the Moon and the Sun (Meeus Ch. 25 solar coordinates + twilight phase).
+- **Sensor-Fused Celestial AR (`sensors/OrientationSensorManager.kt`, `ar/ArProjection.kt`, `ui/ArOverlayCanvas.kt`)**:
+  - Uses `TYPE_ROTATION_VECTOR` (with accelerometer + magnetometer fallback), Gram-Schmidt orthonormalized low-pass smoothing, display rotation remapping, `GeomagneticField` true-north declination, and Camera2 physical FOV intrinsics.
 
-## Building an APK with GitHub Actions
+## Building & Releasing an APK with GitHub Actions
 
 1. Upload the extracted project files (keeping `.github/workflows/build-apk.yml` and `app/src/main/AndroidManifest.xml` in place) to a GitHub repository.
-2. Open the **Actions** tab and run **Build Moon AR Tracker APK** (or push to `main`).
-3. Download the compiled `app-debug.apk` from the workflow's **Artifacts** section (`MoonARTracker-debug-apk`).
+2. Push to `main`/`master` or trigger **Build Moon AR Tracker APK** manually in the **Actions** tab.
+3. Once the workflow finishes, download `MoonARTracker-v1.0.<run_number>-debug.apk` directly from the repository's **Releases** tab (it is also uploaded as a workflow artifact).
